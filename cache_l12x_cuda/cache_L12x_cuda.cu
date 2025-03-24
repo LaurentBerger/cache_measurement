@@ -7,29 +7,50 @@
 #include <cuda_runtime_api.h>
 
 #define NB_PAS_MAX 81
-#define TPS_MAX_PAR_TEST 1
-#define MIN_CLCK 1
+#define TPS_MAX_PAR_TEST 2
 #define TYPEREEL float
+
+
+
 
 
 #ifdef _WIN32
 #include <windows.h>
 #include <processthreadsapi.h>
 FILETIME a, b, c, d;
-inline double getCpuTime()
+// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes
+std::pair<std::chrono::steady_clock::time_point, double> getWallTimeAndCpuTime()
 {
-	if (GetProcessTimes(GetCurrentProcess(), &a, &b, &c, &d) != 0)
-    {
-		return
-			(double)(d.dwLowDateTime |
-				((unsigned long long)d.dwHighDateTime << 32)) * 0.0000001;
+	FILETIME a, b, c, d;
+	if (GetProcessTimes(GetCurrentProcess(), &a, &b, &c, &d) != 0) {
+		double cpu = (double)(d.dwLowDateTime | ((unsigned long long)d.dwHighDateTime << 32)) * 0.0000001;
+		return std::pair<std::chrono::steady_clock::time_point, double>(std::chrono::steady_clock::now(), cpu);
 	}
-	return 0;
+	else {
+		//  Handle error
+		return std::pair<std::chrono::steady_clock::time_point, double>(std::chrono::steady_clock::now(), -1);
+	}
+}
+// https://stackoverflow.com/questions/2513505/how-to-get-available-memory-c-g
+unsigned long long getTotalSystemMemory()
+{
+	MEMORYSTATUSEX status;
+	status.dwLength = sizeof(status);
+	GlobalMemoryStatusEx(&status);
+	return status.ullTotalPhys;
 }
 #else
-inline double getCpuTime()
+#include <unistd.h>
+
+unsigned long long getTotalSystemMemory()
 {
-	return std::clock() / double(CLOCKS_PER_SEC);
+	long pages = sysconf(_SC_PHYS_PAGES);
+	long page_size = sysconf(_SC_PAGE_SIZE);
+	return pages * page_size;
+}
+std::pair<std::chrono::steady_clock::time_point, double> getWallTimeAndCpuTime()
+{
+	return std::pair<std::chrono::steady_clock::time_point, double>(std::chrono::steady_clock::now(), std::clock() / double(CLOCKS_PER_SEC));
 }
 #endif
 
@@ -102,7 +123,7 @@ int main() {
 	if (erreur != cudaSuccess)
 		std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
 	double tps = 0;
-	while (tps< MIN_CLCK)
+	while (tps < TPS_MAX_PAR_TEST)
 	{
 		nbTest *= 2;
 		int nbElt = int(pow(2.0, 7 / 3.0));
@@ -118,18 +139,17 @@ int main() {
 		erreur = cudaGetLastError();
 		if (erreur != cudaSuccess)
 			std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
-		double finPre;
-		double debut = getCpuTime();
+		std::pair<std::chrono::steady_clock::time_point, double> tpsDeb = getWallTimeAndCpuTime(), tpsFin;
 		addTestLoop << <1, 1 >> > (tabA, tabB, tabC, nbElt, nbTest);
 		cudaDeviceSynchronize();
+		tpsFin = getWallTimeAndCpuTime();
 		erreur = cudaGetLastError();
 		if (erreur != cudaSuccess)
 			std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
-		finPre = getCpuTime();
-		tps = finPre - debut;
+		tps = tpsFin.second - tpsDeb.second;
 
 	}
-	std::cout << "loop of" << nbTest <<std::endl;
+	std::cout << "Nombre de tests : " << nbTest << " pour un temps de " << tps << "\n";
 	for (int idx = 7; idx < nbPas;idx++)
 	{
 		
@@ -146,32 +166,32 @@ int main() {
 		erreur = cudaGetLastError();
 		if (erreur != cudaSuccess)
 			std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
-		double tpsParTest = 0;
 		if (tpsPre > TPS_MAX_PAR_TEST)
 			nbTest /= 2;
 		if (nbTest == 0)
 			nbTest = 1;
-		double finPre;
-		double debut = getCpuTime();
+		std::pair<std::chrono::steady_clock::time_point, double> tpsDeb = getWallTimeAndCpuTime(), tpsFin;
 		addTestLoop <<<1, 1 >>> (tabA, tabB, tabC, nbElt, nbTest);
-		erreur = cudaGetLastError();
-		if (erreur != cudaSuccess)
-			std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
 		cudaDeviceSynchronize();
+		tpsFin = getWallTimeAndCpuTime();
 		erreur = cudaGetLastError();
 		if (erreur != cudaSuccess)
 			std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
-		finPre = getCpuTime();
-		double tps = finPre - debut;
-		tpsParTest = tps;
-		std::cout << "<-- " << nbElt * 3 * sizeof(TYPEREEL) << ", "  << nbElt << ", " << idx <<" -->\nDurée sans thread (" << tpsParTest << " ticks) ";
-		tpsPre = tps;
-		tpsParTest = tpsParTest  / nbTest;
-		std::cout << tpsParTest << "s (" << tpsParTest / nbElt << "s par élément) nbTest=" << nbTest<<"\n";
-		rapport << nbElt*3*sizeof(TYPEREEL) << "\t" << nbTest << "\t";
-		rapport << tpsParTest / nbElt << "\t" << tps;
-		rapport << "\n";
+		erreur = cudaGetLastError();
+		if (erreur != cudaSuccess)
+			std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
+		double tpsCpu = tpsFin.second - tpsDeb.second;
+		double tpsWall = double(std::chrono::time_point_cast<std::chrono::milliseconds>(tpsFin.first).time_since_epoch().count());
+		tpsWall -= double(std::chrono::time_point_cast<std::chrono::milliseconds>(tpsDeb.first).time_since_epoch().count());
+		tpsWall /= 1000;
+		std::cout << "<-- " << nbElt << ", " << nbTest << " -->\n";
+		std::cout << "Duree : " << tpsWall << " s " << tpsWall / nbTest << "s (" << tpsWall / nbTest / nbElt << "s par element)\t";
+		std::cout << "Duree cpu : " << tpsCpu << " s " << tpsCpu / nbTest << "s (" << tpsCpu / nbTest / nbElt << "cpu par element) nbTest=" << nbTest << "\n";
+		rapport << tpsWall / nbTest / nbElt << "\t" << tpsWall << "\t";
+		rapport << tpsCpu / nbTest / nbElt << "\t" << tpsCpu;
 		rapport.flush();
+		rapport << "\n";
+		tpsPre = tpsWall;
 
 	}
 	cudaFree(tabA);
