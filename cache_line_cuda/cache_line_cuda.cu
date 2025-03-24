@@ -3,10 +3,12 @@
 #include <chrono>
 #include <cmath>
 #include  <cfloat>
+#include <cuda.h>
+#include <cuda_runtime_api.h>
 
-#define NB_TEST 111ll
+#define NB_TEST 1ll
 #define NB_PAS 13
-#define TYPEREEL float
+#define TYPEREEL double
 
 
 #ifdef _WIN32
@@ -52,46 +54,82 @@ std::pair<std::chrono::steady_clock::time_point, double> getWallTimeAndCpuTime()
 #endif
 
 
-void initTab(TYPEREEL* tab, TYPEREEL val, int nbElt)
+__global__ void initTab(TYPEREEL* tab, TYPEREEL val, int nbElt)
 {
 	for (int idx = 0; idx < nbElt; idx++)
-		tab[idx] = val+idx;
+		tab[idx] = val + idx;
+}
+
+__global__ void addTestLoop(TYPEREEL* tabA, int nbElt, int nbTest, int K)
+{
+	for (long long int idxTest = 0; idxTest < nbTest; idxTest++)
+		for (int i = 0; i < nbElt; i+=K)
+			tabA[i] *= 3;
+
 }
 
 
 int main() {
-	unsigned long long maxMem = getTotalSystemMemory() / 128;
-	int nbEltMax = maxMem / sizeof(TYPEREEL);
-	bool init = true;
-	std::ofstream rapport("tps_fct_mem.txt");
-	double tpsPre = 0;
-	long long int nbTest = NB_TEST;
-	TYPEREEL *tabA = new TYPEREEL[nbEltMax];
+	int deviceId;
+	int deviceCount = 0;
+	cudaError_t erreur;
+
+	size_t free, total;
+	CUdevice dev;
+	CUcontext ctx;
+	cuInit(0);
+	cuDeviceGet(&dev, 0);
+	cuCtxCreate(&ctx, 0, dev);
+	CUresult cuRes = cuMemGetInfo(&free, &total);
+	if (cuRes != 0)
+		std::cout << "Error: " << cudaGetErrorString(cudaError_t(cuRes)) << "\n";
+	erreur = cudaGetLastError();
+	if (erreur != cudaSuccess)
+		std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
+	std::cout << "free memory : " << free << "\n";
+	std::cout << "total memory : " << total << "\n";
+	int nbEltMax = free / sizeof(TYPEREEL) /128;
+	if (nbEltMax <= 0)
+	{
+		std::cout << "Something went wrong...";
+		return -1;
+	}
+	cudaGetDeviceCount(&deviceCount);
+
+	cudaGetDevice(&deviceId);
+	cudaSetDevice(deviceId);
+	TYPEREEL* tabA;
+	cudaMallocManaged(&tabA, sizeof(TYPEREEL) * nbEltMax);
+	erreur = cudaGetLastError();
+	if (erreur != cudaSuccess)
+		std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
 	int K = 1;
+	std::ofstream rapport("tps_fct_mem.txt");
+	long long int nbTest = NB_TEST;
+
 	for (int idx = 1; idx < NB_PAS;idx++)
 	{
 		
 		int nbElt = nbEltMax;
-		initTab(tabA, 2.0, nbElt);
-		int idxPre = 0;
+		initTab << <1, 1 >> > (tabA, 2.0, nbElt);
+		erreur = cudaGetLastError();
+		if (erreur != cudaSuccess)
+			std::cout << "Error: " << cudaGetErrorString(erreur) << "\n";
 
 		std::pair<std::chrono::steady_clock::time_point, double> tpsDeb = getWallTimeAndCpuTime(), tpsFin;
-		for (long long int idxTest = 0; idxTest < nbTest; idxTest++)
-		{
-			for (int i = 0; i < nbElt; i+=K)
-				tabA[i] *= 3;
-		}
+		addTestLoop << <1, 1 >> > (tabA, nbElt, nbTest, K);
+		cudaDeviceSynchronize();
 		tpsFin = getWallTimeAndCpuTime();
 		double tpsCpu = tpsFin.second - tpsDeb.second;
 		double tpsWall = double(std::chrono::time_point_cast<std::chrono::milliseconds>(tpsFin.first).time_since_epoch().count());
 		tpsWall -= double(std::chrono::time_point_cast<std::chrono::milliseconds>(tpsDeb.first).time_since_epoch().count());
 		tpsWall /= 1000;
 		std::cout << "<-- " << nbElt << ", " << nbTest << ", " << K << ", " << sizeof(TYPEREEL) << " -->\n";
-		std::cout << "Duree : " << tpsWall << " s " << tpsWall / nbTest << "s (" << tpsWall / nbTest / nbElt * K<< "s par element)\t";
-		std::cout << "Duree cpu : " << tpsCpu << " s " << tpsCpu / nbTest << "s (" << tpsCpu / nbTest / nbElt  * K<< "cpu par element) nbTest=" << nbTest << "\n";
+		std::cout << "Duree : " << tpsWall << " s " << tpsWall / nbTest << "s (" << tpsWall / nbTest / nbElt * K << "s par element)\t";
+		std::cout << "Duree cpu : " << tpsCpu << " s " << tpsCpu / nbTest << "s (" << tpsCpu / nbTest / nbElt * K << "cpu par element) nbTest=" << nbTest << "\n";
 		rapport << nbElt << "\t" << nbTest << "\t" << K << "\t" << sizeof(TYPEREEL) << "\t";
-		rapport << tpsWall / nbTest / nbElt  * K<< "\t" << tpsWall << "\t";
-		rapport << tpsCpu / nbTest / nbElt  * K<< "\t" << tpsCpu;
+		rapport << tpsWall / nbTest / nbElt << "\t" << tpsWall << "\t";
+		rapport << tpsCpu / nbTest / nbElt << "\t" << tpsCpu;
 		rapport << "\n";
 		rapport.flush();
 		K *= 2;
